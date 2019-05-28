@@ -2,6 +2,7 @@ import ssl
 import json
 import urllib3
 import time
+import pika
 import elastic_helper
 from elasticsearch import Elasticsearch
 from elasticsearch.connection import create_ssl_context
@@ -40,7 +41,8 @@ def group_services(data, sort_by):
         exists = False
         for value in services:
             if one["_source"]["system"]["process"]["name"] == value["name"]:
-                value["memory"] += one["_source"]["system"]["process"]["memory"]["rss"]["pct"]
+                value["memory_percent"] += one["_source"]["system"]["process"]["memory"]["rss"]["pct"]
+                value["memory"] += one["_source"]["system"]["process"]["memory"]["rss"]["bytes"] 
                 value["cpu"] += one["_source"]["system"]["process"]["cpu"]["total"]["pct"]
                 value["count"] += 1
                 exists = True
@@ -48,34 +50,55 @@ def group_services(data, sort_by):
         if not exists:
             service = {}
             service["name"] = one["_source"]["system"]["process"]["name"]
-            service["memory"] = one["_source"]["system"]["process"]["memory"]["rss"]["pct"]
+            service["memory_percent"] = one["_source"]["system"]["process"]["memory"]["rss"]["pct"]
+            service["memory"] = one["_source"]["system"]["process"]["memory"]["rss"]["bytes"]
             service["cpu"] = one["_source"]["system"]["process"]["cpu"]["total"]["pct"]
             service["count"] = 1
             services.append(service)
     for value in services:
-        value["memory"] = value["memory"] / value["count"]
+        value["memory"] = value["memory"] / value["count"] / 1048576
+        value["memory_percent"] = value["memory_percent"] / value["count"]
         value["cpu"] = value["cpu"] / value["count"]
     services.sort(key =lambda k: k[sort_by], reverse=True)
     return services
 
+def msg_make(serverName, services, server_name, avg_memory_used, origin, severity):
+    #return json.dumps({'name': serverName, 'message': services, 'origin': origin, 'severity': severity})
+    table = " <b> High memory usage: %s used memory %.2f%%</b> " % (server_name, avg_memory_used * 100)
+    for service in services:
+        table += "\n <i> %s used </i><b>%.2f%%</b> <i>total of </i><b>%.2fmb</b>" % (service["name"], service["memory_percent"] * 100, service["memory"])
+
+    return json.dumps({'name': serverName, 'message': table, 'origin': origin, 'severity': severity, 'format': 'HTML'})
+
 time_before = time.time()
+#rabbit
+credentials = pika.PlainCredentials(config["rabbit"]["user"], config["rabbit"]["password"])
+connection = pika.BlockingConnection(pika.ConnectionParameters(config["rabbit"]["server"], config["rabbit"]["port"], '/', credentials))#add to config
+channel = connection.channel()
+channel.exchange_declare(exchange='alarms', exchange_type='fanout')
 
 #check free memory sate
 for srv in servers:
     res = es.search(index="metricbeat*", body=elastic_helper.get_memory_query(srv))
-    avg_memory_used = get_avg(res["hits"]["hits"], res["hits"]["total"]["value"], ["_source","system","memory","actual", "used","pct"])
+    avg_memory_used = get_avg(res["hits"]["hits"], res["hits"]["total"]["value"], ["_source", "system", "memory", "actual", "used", "pct"])
     if avg_memory_used > 0.70:
-        print(srv + " " + str(avg_memory_used))
-        print(res["hits"]["total"])
         res = es.search(index="metricbeat*", body=elastic_helper.get_processes_query(srv))
-        #print(res["hits"]["hits"][0]["_source"]["system"]["process"]["name"])
-        #print(res["hits"]["hits"][0]["_source"]["system"]["process"]["memory"]["rss"]["pct"])
-        print(group_services(res["hits"]["hits"], "memory"))
-    #print(res["hits"]["hits"][0]["_source"]["system"]["memory"]["actual"]["used"]["pct"])
+        services = group_services(res["hits"]["hits"], "memory")
+        channel.basic_publish(exchange='alarms', 
+                                routing_key='', 
+                                body=msg_make("10.20.6.38", services, srv, avg_memory_used, "hardwareServers", "warning"))
+        print(srv)
 
-#for srv in servers:
-#    res = es.search(index="metricbeat*", body=elastic_helper.get_cpu_query(srv))
-#    print (srv + ": " + str(get_avg(res["hits"]["hits"], res["hits"]["total"]["value"], ["_source","system","cpu","idle","pct"])/res["hits"]["hits"][0]["_source"]["system"]["cpu"]["cores"]))
+for srv in servers:
+    res = es.search(index="metricbeat*", body=elastic_helper.get_cpu_query(srv))
+    avg_cpu_idle = get_avg(res["hits"]["hits"], 
+        res["hits"]["total"]["value"], 
+        ["_source","system","cpu","idle","pct"])/res["hits"]["hits"][0]["_source"]["system"]["cpu"]["cores"]
+    if avg_cpu_idle < 0.20:
+        res = es.search(index="metricbeat*", body=elastic_helper.get_processes_query(srv))
+        print(group_services(res["hits"]["hits"], "cpu"))
+        #print (srv + ": " + str(get_avg(res["hits"]["hits"], res["hits"]["total"]["value"], ["_source","system","cpu","idle","pct"])/res["hits"]["hits"][0]["_source"]["system"]["cpu"]["cores"]))
+
 
 print("time took: " + str(time.time() - time_before))
 time_before = time.time()
