@@ -67,7 +67,6 @@ def msg_make(serverName, services, server_name, avg_memory_used, origin, severit
     table = " <b> High memory usage: %s used memory %.2f%%</b> " % (server_name, avg_memory_used * 100)
     for service in services:
         table += "\n <i> %s used </i><b>%.2f%%</b> <i>total of </i><b>%.2fmb</b>" % (service["name"], service["memory_percent"] * 100, service["memory"])
-
     return json.dumps({'name': serverName, 'message': table, 'origin': origin, 'severity': severity, 'format': 'HTML'})
 
 time_before = time.time()
@@ -79,10 +78,10 @@ channel.exchange_declare(exchange='alarms', exchange_type='fanout')
 
 #check free memory sate
 for srv in servers:
-    res = es.search(index="metricbeat*", body=elastic_helper.get_memory_query(srv))
+    res = es.search(index="metricbeat*", body=elastic_helper.get_general(srv, "memory"))
     avg_memory_used = get_avg(res["hits"]["hits"], res["hits"]["total"]["value"], ["_source", "system", "memory", "actual", "used", "pct"])
     if avg_memory_used > 0.70:
-        res = es.search(index="metricbeat*", body=elastic_helper.get_processes_query(srv))
+        res = es.search(index="metricbeat*", body=elastic_helper.get_general(srv, "process"))
         services = group_services(res["hits"]["hits"], "memory")
         channel.basic_publish(exchange='alarms', 
                                 routing_key='', 
@@ -90,12 +89,12 @@ for srv in servers:
         print(srv)
 
 for srv in servers:
-    res = es.search(index="metricbeat*", body=elastic_helper.get_cpu_query(srv))
+    res = es.search(index="metricbeat*", body=elastic_helper.get_general(srv, "cpu"))
     avg_cpu_idle = get_avg(res["hits"]["hits"], 
         res["hits"]["total"]["value"], 
         ["_source","system","cpu","idle","pct"])/res["hits"]["hits"][0]["_source"]["system"]["cpu"]["cores"]
     if avg_cpu_idle < 0.20:
-        res = es.search(index="metricbeat*", body=elastic_helper.get_processes_query(srv))
+        res = es.search(index="metricbeat*", body=elastic_helper.get_general(srv, "process"))
         print(group_services(res["hits"]["hits"], "cpu"))
         #print (srv + ": " + str(get_avg(res["hits"]["hits"], res["hits"]["total"]["value"], ["_source","system","cpu","idle","pct"])/res["hits"]["hits"][0]["_source"]["system"]["cpu"]["cores"]))
 
